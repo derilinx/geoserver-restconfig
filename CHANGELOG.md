@@ -1,5 +1,17 @@
 # Change Log
 
+## 2.0.2 [2020-03-30]
+
+<li> 2020-03-30: "Create Style" compliancy with GeoServer 2.16.x / 2.17.x</li>
+
+## 2.0.1 [2020-02-06]
+
+<li> 2020-02-06: - Bump to version 2.0.1 </li>
+<li> 2020-02-06: - Check resp content is a string</li>
+
+## 2.0.0 [2020-01-16]
+<li> 2020-01-14: Python 3 / Django 2 Compatibility</li>
+
 ## [1.0.5](https://github.com/GeoNode/geoserver-restconfig/releases/tag/1.0.5) (2019-11-21)
 
 ### Changelog

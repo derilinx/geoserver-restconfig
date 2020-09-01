@@ -172,7 +172,10 @@ class Catalog(object):
         resp = self.http_request(url)
         version = None
         if resp.status_code == 200:
-            dom = XML(resp.content)
+            content = resp.content
+            if isinstance(content, bytes):
+                content = content.decode('UTF-8')
+            dom = XML(content)
             resources = dom.findall("resource")
             for resource in resources:
                 if resource.attrib["name"] == "GeoServer":
@@ -242,6 +245,8 @@ class Catalog(object):
 
         def parse_or_raise(xml):
             try:
+                if not isinstance(xml, string_types):
+                    xml = xml.decode()
                 return XML(xml)
             except (ExpatError, SyntaxError) as e:
                 msg = "GeoServer gave non-XML response for [GET %s]: %s"
@@ -254,8 +259,11 @@ class Catalog(object):
         else:
             resp = self.http_request(rest_url)
             if resp.status_code == 200:
-                self._cache[rest_url] = (datetime.now(), resp.content)
-                return parse_or_raise(resp.content)
+                content = resp.content
+                if isinstance(content, bytes):
+                    content = content.decode('UTF-8')
+                self._cache[rest_url] = (datetime.now(), content)
+                return parse_or_raise(content)
             else:
                 raise FailedRequestError(resp.content)
 
@@ -319,7 +327,7 @@ class Catalog(object):
             else:
                 workspaces = self.get_workspaces(names=workspaces)
         else:
-            workspaces = []
+            workspaces = self.get_workspaces()
 
         stores = []
         for ws in workspaces:
@@ -334,9 +342,13 @@ class Catalog(object):
             names = []
         elif isinstance(names, string_types):
             names = [s.strip() for s in names.split(',') if s.strip()]
+        elif not isinstance(names, list):
+            names = [names]
+            if len(names) and not isinstance(names[0], string_types):
+                names = [_n.name for _n in names]
 
         if stores and names:
-            return ([store for store in stores if store.name in names])
+            return [_s for _s in stores if _s.name in names]
 
         return stores
 
@@ -531,7 +543,7 @@ class Catalog(object):
         try:
             resp = self.http_request(url, method='put', data=upload_data, headers=headers)
             if resp.status_code != 201:
-                raise FailedRequestError('Failed to create ImageMosaic {} : {}, {}'.format(name, resp.status_code, resp.text))
+                raise FailedRequestError('Failed to create ImageMosaic {} : {}, {}'.format(url, resp.status_code, resp.text))
             self._cache.clear()
         finally:
             if hasattr(upload_data, "close"):
@@ -892,9 +904,11 @@ class Catalog(object):
         names, stores and workspaces can be provided as a comma delimited strings or as arrays, and are used for filtering.
         Will always return an array.
         '''
+        if workspaces and not isinstance(workspaces, list):
+            workspaces = [workspaces]
+
         if not stores:
             _stores = self.get_stores(
-                names=names,
                 workspaces=workspaces
             )
         elif not isinstance(stores, list):
@@ -906,18 +920,23 @@ class Catalog(object):
         for s in _stores:
             try:
                 if isinstance(s, string_types):
-                    s = self.get_store(
-                        s,
-                        workspace=workspaces[0] if workspaces else None
-                    )
-                resources.extend(s.get_resources())
+                    if workspaces:
+                        for w in workspaces:
+                            if self.get_store(s, workspace=w):
+                                s = self.get_store(s, workspace=w)
+                                if s:
+                                    resources.extend(s.get_resources())
+                    else:
+                        s = self.get_store(s)
+                        if s:
+                            resources.extend(s.get_resources())
+                else:
+                    resources.extend(s.get_resources())
             except FailedRequestError:
                 continue
 
-        if names is None:
-            names = []
-        elif isinstance(names, string_types):
-            names = [s.strip() for s in names.split(',') if s.strip()]
+        if isinstance(names, string_types):
+            names = [s.strip() for s in names.split(',')]
 
         if resources and names:
             return ([resource for resource in resources if resource.name in names])
@@ -1039,7 +1058,7 @@ class Catalog(object):
             # Add global styles
             url = "{}/styles.xml".format(self.service_url)
             styles = self.get_xml(url)
-            all_styles.extend([Style(self, s.find('name').text) for s in styles.findall("style")])
+            all_styles.extend(self.__build_style_list(styles))
             workspaces = []
         elif isinstance(workspaces, string_types):
             workspaces = [s.strip() for s in workspaces.split(',') if s.strip()]
@@ -1063,8 +1082,7 @@ class Catalog(object):
                     continue
                 else:
                     raise FailedRequestError("Failed to get styles: {}".format(e))
-
-            all_styles.extend([Style(self, s.find("name").text, _name(ws)) for s in styles.findall("style")])
+            all_styles.extend(self.__build_style_list(styles, ws))
 
         if names is None:
             names = []
@@ -1074,6 +1092,15 @@ class Catalog(object):
         if all_styles and names:
             return ([style for style in all_styles if style.name in names])
 
+        return all_styles
+
+    def __build_style_list(self, styles_tree, ws=None):
+        all_styles = []
+        for s in styles_tree.findall("style"):
+            style_format = self.get_xml(s[1].attrib.get('href')).find('format').text
+            style_version = self.get_xml(s[1].attrib.get('href')).find('languageVersion').find(
+                'version').text.replace('.', '')[:-1]
+            all_styles.append(Style(self, s.find("name").text, _name(ws), style_format + style_version))
         return all_styles
 
     def get_style(self, name, workspace=None):
@@ -1123,7 +1150,13 @@ class Catalog(object):
 
             resp = self.http_request(body_href, method='put', data=data, headers=headers)
             if resp.status_code not in (200, 201, 202):
-                raise FailedRequestError('Failed to create style {} : {}, {}'.format(name, resp.status_code, resp.text))
+                body_href = os.path.splitext(style.body_href)[0] + '.xml'
+                if raw:
+                    body_href += "?raw=true"
+
+                resp = self.http_request(body_href, method='put', data=data, headers=headers)
+                if resp.status_code not in (200, 201, 202):
+                    raise FailedRequestError('Failed to create style {} : {}, {}'.format(name, resp.status_code, resp.text))
 
             self._cache.pop(style.href, None)
             self._cache.pop(style.body_href, None)
